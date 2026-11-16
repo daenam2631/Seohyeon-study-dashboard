@@ -311,6 +311,12 @@
   }
   .clock.off{color:#B6AEC6}
   .timer-status{text-align:center;font-size:11px;font-weight:800;color:#9C90A6;letter-spacing:-.02em;min-height:16px}
+  .timer-opt{
+    display:flex;align-items:center;justify-content:center;gap:6px;margin-top:11px;
+    font-size:11px;font-weight:800;color:#A79AB2;letter-spacing:-.02em;line-height:1;cursor:pointer;user-select:none;
+  }
+  .timer-opt input{width:14px;height:14px;margin:0;accent-color:#8FD3B4;cursor:pointer}
+  .timer-opt input:checked + span{color:#57796A}
   .timer-btns{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:11px}
   .tbtn{
     -webkit-appearance:none;appearance:none;cursor:pointer;font-family:inherit;
@@ -669,7 +675,11 @@
         </div>
       </div>
       <div class="timer-result" id="timerResult"></div>
-      <p class="card-desc" style="margin-top:9px">다른 앱·화면으로 넘어가면 자동으로 멈춰요</p>
+      <label class="timer-opt" for="optAutoPause">
+        <input type="checkbox" id="optAutoPause">
+        <span>화면 전환 시 자동 멈춤</span>
+      </label>
+      <p class="card-desc" id="timerOptNote" style="margin-top:6px">화면이 꺼지거나 다른 앱으로 넘어가도 계속 흘러요 (기본)</p>
     </section>
 
     <!-- ⑧ 신문 한 줄 -->
@@ -744,6 +754,9 @@
   var JSON_URL = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:json&gid=' + GID;
   var LS_KEY = 'seohyeon.dashboard.v2';
   var WEEK_GOAL = 1470;
+  /* 시트 자동 전송에 쓸 Google Apps Script 웹앱 주소.
+     기본값으로 넣고 싶을 때 여기에 '/exec' 주소를 적어 두면 설정 없이도 전송돼요. */
+  var DEFAULT_GAS_URL = '';
 
   var DOW = ['월','화','수','목','금','토','일'];
   var CHARS = ['🐻','🐰','🐱','🐹','🐥','🐼','🐨'];
@@ -823,7 +836,7 @@
 
   /* ══ 저장소 ════════════════════════════════════════════ */
   function blankStore(){
-    return { v:2, logs:[], news:[], settings:{ gasUrl:'' }, timer:null, ui:{ tab:'overview' } };
+    return { v:2, logs:[], news:[], settings:{ gasUrl:'', autoPauseOnHidden:false }, timer:null, ui:{ tab:'overview' } };
   }
   function loadStore(){
     var d = blankStore();
@@ -834,7 +847,7 @@
       if(!p || typeof p !== 'object') return d;
       d.logs = Array.isArray(p.logs) ? p.logs : [];
       d.news = Array.isArray(p.news) ? p.news : [];
-      d.settings = Object.assign({ gasUrl:'' }, p.settings || {});
+      d.settings = Object.assign({ gasUrl:'', autoPauseOnHidden:false }, p.settings || {});
       d.timer = p.timer || null;
       d.ui = Object.assign({ tab:'overview' }, p.ui || {});
     }catch(e){}
@@ -1522,16 +1535,28 @@
     });
   }
 
+  function gasUrl(){
+    return ((state.store.settings && state.store.settings.gasUrl) || DEFAULT_GAS_URL || '').trim();
+  }
   function gasPost(payload){
-    var url = (state.store.settings.gasUrl || '').trim();
+    var url = gasUrl();
     if(!url) return Promise.resolve({ ok:false, skipped:true });
+    var body = JSON.stringify(payload);
+    /* Apps Script 웹앱은 application/json 이면 preflight(OPTIONS)에서 막히므로
+       simple request(text/plain) + no-cors 로 보낸다. 응답은 opaque 라 내용은 읽지 않는다. */
     return fetch(url, {
       method:'POST',
       mode:'no-cors',
       headers:{ 'Content-Type':'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
+      body: body
     }).then(function(){ return { ok:true }; })
-      .catch(function(e){ return { ok:false, error:String(e) }; });
+      .catch(function(){
+        /* 폴백: POST 가 막히면 같은 JSON 을 쿼리스트링으로 붙여 GET 으로 한 번 더 시도 */
+        var q = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'data=' + encodeURIComponent(body);
+        return fetch(q, { method:'GET', mode:'no-cors', cache:'no-store' })
+          .then(function(){ return { ok:true, via:'query' }; })
+          .catch(function(e){ return { ok:false, error:String(e) }; });
+      });
   }
 
   /* ══ 타이머 ════════════════════════════════════════════ */
@@ -1552,10 +1577,11 @@
     timer.accum = saved.accum || 0;
     timer.startLabel = saved.startLabel || '';
     if(saved.running && saved.startedAt){
-      timer.accum += Math.max(0, Date.now() - saved.startedAt);
-      timer.running = false;
-      timer.pausedBy = 'reload';
-      timer.promptReload = true;
+      /* 화면이 꺼졌거나 앱을 닫았어도 계속 흐르도록, 저장된 시작 시각(startedAt)으로 이어서 센다.
+         elapsed = accum + (지금 - startedAt) 이므로 두 값을 그대로 살려 두면 된다. */
+      timer.running = true;
+      timer.startedAt = saved.startedAt;      /* 이어서 세려면 시작 시각을 그대로 살려 둔다 */
+      timer.pausedBy = '';
     } else {
       timer.running = false;
       timer.pausedBy = saved.pausedBy || 'manual';
@@ -1565,7 +1591,7 @@
     state.store.timer = {
       subject: timer.subject,
       running: timer.running,
-      accum: timer.running ? timer.accum + (Date.now() - timer.startedAt) : timer.accum,
+      accum: timer.accum,                       /* 이번 구간 전 누적값 (startedAt 과 함께 계산) */
       startedAt: timer.running ? timer.startedAt : 0,
       startLabel: timer.startLabel,
       pausedBy: timer.pausedBy
@@ -1652,6 +1678,19 @@
   }
   function hideResumePrompt(){ $('resumeBadge').classList.remove('show'); }
 
+  /* 화면 전환 시 자동 멈춤 (기본값: 꺼짐 → 화면이 꺼져도 계속 흐름) */
+  function autoPauseEnabled(){
+    return !!(state.store.settings && state.store.settings.autoPauseOnHidden);
+  }
+  function syncTimerOpt(){
+    var box = $('optAutoPause');
+    if(box) box.checked = autoPauseEnabled();
+    var note = $('timerOptNote');
+    if(note) note.textContent = autoPauseEnabled()
+      ? '화면을 벗어나면 잠시 멈춰요 (돌아오면 이어서 공부)'
+      : '화면이 꺼지거나 다른 앱으로 넘어가도 계속 흘러요 (기본)';
+  }
+
   function stopTimer(){
     if(timer.running){ timer.accum += Math.max(0, Date.now() - timer.startedAt); timer.running = false; }
     var sec = Math.round(timer.accum / 1000);
@@ -1679,7 +1718,7 @@
     renderAll();
     showResult(log, def);
     var payload = { type:'study', date: log.date, subject: def.name, minutes: log.minutes, start: log.start, memo: '타이머 기록' };
-    if((state.store.settings.gasUrl || '').trim()){
+    if(gasUrl()){
       gasPost(payload).then(function(r){
         if(r.ok){ toast('기록을 저장하고 시트로 보냈어요'); }
         else { toast('기록은 저장했지만 시트 전송에 실패했어요'); }
@@ -1701,7 +1740,7 @@
       '✅ ' + esc(def.short) + ' ' + fmt(log.minutes) + '분 기록 완료! 오늘 합계 ' + fmt(dayTotal(log.date)) + '분' +
       '<div class="rrow">' +
         '<button type="button" id="resCopy">📋 기록 복사</button>' +
-        (state.store.settings.gasUrl ? '<button type="button" id="resSend">📤 시트로 보내기</button>' : '') +
+        (gasUrl() ? '<button type="button" id="resSend">📤 시트로 보내기</button>' : '') +
         '<button type="button" id="resClose">닫기</button>' +
       '</div>';
     box.classList.add('show');
@@ -1831,15 +1870,37 @@
     toast('타이머를 비웠어요. 다음에 다시 시작해요!');
   });
 
+  /* 기본은 화면이 꺼지거나 다른 화면을 봐도 계속 흐른다.
+     ‘화면 전환 시 자동 멈춤’을 켠 경우에만 멈춘다. */
   document.addEventListener('visibilitychange', function(){
-    if(document.visibilityState === 'hidden') autoPause('hidden');
-    else if(timer.pausedBy === 'hidden' && $('resumeBadge').classList.contains('show')) { /* 그대로 안내 유지 */ }
+    if(document.visibilityState === 'hidden'){
+      if(autoPauseEnabled()) autoPause('hidden');
+      else if(timer.running) persistTimer();      /* 상태만 저장하고 계속 흐르게 둔다 */
+    } else {
+      renderTimer();                              /* 돌아오면 실제 경과 시간으로 다시 표시 */
+    }
   });
-  window.addEventListener('blur', function(){ autoPause('blur'); });
+  window.addEventListener('blur', function(){
+    if(autoPauseEnabled()) autoPause('blur');
+    else if(timer.running) persistTimer();
+  });
   window.addEventListener('focus', function(){
-    if(!timer.running && timer.accum > 0 && timer.pausedBy) showResumePrompt(timer.pausedBy);
+    renderTimer();
+    if(!timer.running && timer.accum > 0 && timer.pausedBy && timer.pausedBy !== 'manual') showResumePrompt(timer.pausedBy);
   });
-  window.addEventListener('pagehide', function(){ if(timer.running) autoPause('hidden'); });
+  window.addEventListener('pagehide', function(){
+    /* 닫기·앱 전환: 멈추지 않고 running 상태(startedAt)만 저장해 두었다가 다시 열면 이어서 센다 */
+    persistTimer();
+  });
+  var optAuto = $('optAutoPause');
+  if(optAuto){
+    optAuto.addEventListener('change', function(){
+      state.store.settings.autoPauseOnHidden = !!optAuto.checked;
+      saveStore();
+      syncTimerOpt();
+      toast(optAuto.checked ? '이제 화면을 벗어나면 자동으로 멈춰요' : '이제 화면이 꺼져도 계속 흘러요');
+    });
+  }
 
   /* 신문 */
   $('newsDate').value = todayYmd();
@@ -1863,7 +1924,7 @@
     saveStore();
     renderNews();
     $('newsTitle').value = ''; $('newsUrl').value = ''; $('newsSummary').value = ''; $('newsThought').value = '';
-    if((state.store.settings.gasUrl || '').trim()){
+    if(gasUrl()){
       gasPost({ type:'news', date:item.date, title:item.title, url:item.url, summary:item.summary, thought:item.thought })
         .then(function(r){ toast(r.ok ? '저장하고 시트로 보냈어요 📰' : '저장했지만 시트 전송은 실패했어요'); });
     } else {
@@ -1910,14 +1971,17 @@
 
   /* ══ 시작 ══════════════════════════════════════════════ */
   restoreTimer();
-  $('gasUrl').value = state.store.settings.gasUrl || '';
-  if(state.store.settings.gasUrl){
+  syncTimerOpt();
+  $('gasUrl').value = gasUrl();
+  if(gasUrl()){
     $('gasNote').textContent = '저장했어요! 이제 신문 저장·타이머 종료 때 이 주소로 보내요.';
     document.querySelector('.news-setup').setAttribute('open', 'open');
   }
   activateTab(state.store.ui && state.store.ui.tab ? state.store.ui.tab : 'overview', true);
   renderAll();
-  if(timer.accum > 0 && !timer.running && timer.pausedBy && timer.pausedBy !== 'manual'){
+  if(timer.running){
+    startTick();                     /* 창을 닫았다 열어도 이어서 계속 센다 */
+  } else if(timer.accum > 0 && timer.pausedBy && timer.pausedBy !== 'manual'){
     showResumePrompt(timer.pausedBy === 'reload' ? 'reload' : 'hidden');
   }
   loadSheet(false);
