@@ -1859,6 +1859,10 @@
     { id:'calc', ic:'🔢', name:'수학 연산 1차시', note:'수학 · 매일 필수' },
     { id:'talk', ic:'🔤', name:'말해보카', note:'영어 · 매일 필수' }
   ];
+  /* 토·일 주말 필수 루틴 1가지 (2026-11-18 추가) */
+  var WEEKEND_CORE_TASKS = [
+    { id:'talk', ic:'🔤', name:'말해보카', note:'영어 · 주말 필수' }
+  ];
   /* 요일별 추가 공부 (0=월 … 6=일) */
   var DAY_TASKS = [
     [ { id:'word', ic:'🔤', name:'영어 단어 1차시', note:'월요일 · 영어' },
@@ -1889,7 +1893,7 @@
     return s.todo;
   }
   function taskDefs(di){
-    return { core: (di <= 4 ? CORE_TASKS : []), extra: (DAY_TASKS[di] || []) };
+    return { core: (di <= 4 ? CORE_TASKS : WEEKEND_CORE_TASKS), extra: (DAY_TASKS[di] || []) };
   }
   function allTasks(di){ var t = taskDefs(di); return t.core.concat(t.extra); }
   function isChecked(date, id){
@@ -1920,6 +1924,15 @@
     for(var i=0;i<defs.length;i++){ if(!isChecked(date, defs[i].id)) return false; }
     return true;
   }
+  /* 필수 루틴만 봤을 때 다 채웠는지 (평일 4개 · 주말 말해보카 1개) */
+  function coreDone(date){
+    var d = parseYmd(date);
+    if(!d) return false;
+    var defs = taskDefs(dayIdx(d)).core;
+    if(!defs.length) return false;
+    for(var i=0;i<defs.length;i++){ if(!isChecked(date, defs[i].id)) return false; }
+    return true;
+  }
 
   function rulesActive(){
     var t = todoStore();
@@ -1930,7 +1943,7 @@
     }
     return t.free.length > 0;
   }
-  /* ── 다음 달 기본 용돈: 이번 달 평일 필수 루틴 + 엄마 허락 찬스 ── */
+  /* ── 다음 달 기본 용돈: 이번 달 매일 필수 루틴(평일 4개 · 주말 말해보카) + 엄마 허락 찬스 ── */
   function baseMoneyStatus(){
     var now = new Date(), td = todayDate();
     var passed = [];
@@ -1939,13 +1952,11 @@
     if(rs && rs > start) start = rs;
     var d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
     while(d <= td){
-      if(dayIdx(d) <= 4){
-        /* 오늘은 저녁 10시가 지나야 채점 (아직 남은 하루) */
-        if(!sameDay(d, td) || now.getHours() >= 22) passed.push(ymd(d));
-      }
+      /* 오늘은 저녁 10시가 지나야 채점 (아직 남은 하루) */
+      if(!sameDay(d, td) || now.getHours() >= 22) passed.push(ymd(d));
       d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
     }
-    var missed = passed.filter(function(k){ return !dayDone(k); }).length;
+    var missed = passed.filter(function(k){ return !coreDone(k); }).length;
     var used = Math.min(CHANCE_MAX, Math.max(0, todoStore().chances[monthKeyOf(now)] || 0));
     var net = Math.max(0, missed - used);
     var active = rulesActive();
@@ -2090,10 +2101,10 @@
       chip.className = 'mchip no'; chip.textContent = '미달 ' + base.net + '일';
     }
     $('baseNote').innerHTML = (todayYmd() < RULES_START)
-      ? (RULES_START.slice(5).replace('-','/') + '부터 채점이 시작돼요 · 평일 필수 루틴 4개를 다 채우면 달성!')
+      ? (RULES_START.slice(5).replace('-','/') + '부터 채점이 시작돼요 · 매일 필수 루틴(평일 4개·주말 말해보카)을 다 채우면 달성!')
       : (base.empty
-        ? '첫 체크가 쌓이면 채점이 시작돼요 · 평일 필수 루틴 4개를 다 채우면 달성! (' + RULES_START.slice(5).replace('-','/') + '부터 집계)'
-        : ('이번 달 평일 <b>' + base.passed + '일</b> 중 <b>' + (base.passed - base.missed) + '일</b> 필수 루틴 완료' +
+        ? '첫 체크가 쌓이면 채점이 시작돼요 · 매일 필수 루틴(평일 4개·주말 말해보카)을 다 채우면 달성! (' + RULES_START.slice(5).replace('-','/') + '부터 집계)'
+        : ('이번 달 <b>' + base.passed + '일</b> 중 <b>' + (base.passed - base.missed) + '일</b> 필수 루틴 완료' +
            (base.missed
               ? ' · 미달 ' + base.missed + '일은 엄마 찬스로 면제 (' + base.used + '/' + CHANCE_MAX + ' 사용)'
               : ' · 미달 없이 달성 중') +
