@@ -1058,6 +1058,10 @@
                 at:new Date().toISOString(), payload:payload });
     pendingSave(list);
   }
+  function pendingHas(payload){
+    var target = JSON.stringify(payload);
+    return pendingLoad().some(function(it){ return JSON.stringify(it.payload) === target; });
+  }
   function pendingRemove(id){
     pendingSave(pendingLoad().filter(function(it){ return it.id !== id; }));
   }
@@ -1680,7 +1684,7 @@
   function sendStudy(payload){
     if(!gasUrl()){ return Promise.resolve({ ok:false, skipped:true }); }
     if(!navigator.onLine){
-      pendingPush(payload);
+      if(!pendingHas(payload)) pendingPush(payload);
       renderPwa();
       toast('오프라인 저장됨 (인터넷 연결 시 자동 전송)');
       return Promise.resolve({ ok:false, queued:true });
@@ -1689,7 +1693,7 @@
       if(r.ok){
         toast('기록을 저장하고 시트로 보냈어요');
       } else {
-        pendingPush(payload);
+        if(!pendingHas(payload)) pendingPush(payload);
         toast('오프라인 저장됨 (인터넷 연결 시 자동 전송)');
       }
       renderPwa();
@@ -1914,7 +1918,9 @@
     });
     var snd = $('resSend');
     if(snd) snd.addEventListener('click', function(){
-      sendStudy({ type:'study', date: log.date, subject: (def.sheetName || def.name), minutes: log.minutes, start: log.start, memo:'타이머 기록' });
+      var payload = { type:'study', date: log.date, subject: (def.sheetName || def.name), minutes: log.minutes, start: log.start, memo:'타이머 기록' };
+      if(pendingHas(payload)){ flushPending(false); return; }   /* 이미 대기 중이면 같은 기록을 또 넣지 않고 다시 보낸다 */
+      sendStudy(payload);
     });
     var cl = $('resClose');
     if(cl) cl.addEventListener('click', function(){ box.classList.remove('show'); });
