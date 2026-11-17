@@ -1232,8 +1232,24 @@
       d[key] = (d[key] || 0) + min;
       d.total += min;
     }
-    sheetRecords().forEach(function(r){ add(r.date, subjOf(r.subject), r.minutes || 0); });
-    (state.store.logs || []).forEach(function(l){ add(l.date, subjOf(l.subject), l.minutes || 0); });
+    /* 타이머 기록은 이 기기에도 저장되고 시트로도 보내지므로, 시트에서 돌아온 같은 기록을
+       또 더하면 공부 시간이 두 배가 된다. 시트의 ‘타이머 기록’ 행은 이 기기 기록과 짝을 지어
+       한 번만 세고, 짝이 없는 기록(다른 기기·직접 적은 행)은 그대로 더한다. */
+    var echoes = {};                                  /* 날짜|과목|분 → 시트에 있는 같은 기록 수 */
+    sheetRecords().forEach(function(r){
+      var key = subjOf(r.subject), min = r.minutes || 0;
+      if(min > 0 && String(r.content || '').trim() === '타이머 기록'){
+        var k = r.date + '|' + key + '|' + min;
+        echoes[k] = (echoes[k] || 0) + 1;
+      }
+      add(r.date, key, min);
+    });
+    (state.store.logs || []).forEach(function(l){
+      var key = subjOf(l.subject), min = l.minutes || 0;
+      var k = l.date + '|' + key + '|' + min;
+      if(echoes[k] > 0){ echoes[k]--; return; }       /* 시트에 이미 같은 기록이 있으면 건너뜀 */
+      add(l.date, key, min);
+    });
     return map;
   }
   var BYDAY = {};
