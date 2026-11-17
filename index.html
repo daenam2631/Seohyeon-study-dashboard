@@ -3,11 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#FFFDF2">
+<meta name="theme-color" content="#FAF6F0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
 <meta name="apple-mobile-web-app-title" content="서현 공부 대시보드">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌟</text></svg>">
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
 <title>서현’s 공부 대시보드</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -89,6 +92,9 @@
   .status.live{color:#3E8F6C;background:#E9F8EF;border-color:#CFEEDD}
   .status.preview{color:#A5803A;background:#FFF6DC;border-color:#F6E7B4}
   .status.loading{color:#9A9188;background:#F6F2EA;border-color:#EDE4D4}
+  .status.ready{color:#5D8AA8;background:#ECF7FE;border-color:#D3E9F8}
+  .status.offline{color:#B8705A;background:#FFF0E7;border-color:#F8DAC8}
+  .status.pending{color:#A5803A;background:#FFF6DC;border-color:#F6E7B4;cursor:pointer}
 
   /* ── 상단 요약 4칸 ─────────────────── */
   .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:13px}
@@ -665,9 +671,10 @@
         <p class="hero-date" id="todayLabel">11월 16일 월요일</p>
         <p class="hero-sub">스스로 공부하는 힘을 기른다! · 하루 최소 3시간</p>
       </div>
-      <div class="hero-actions">
+<div class="hero-actions">
         <button class="btn primary" id="reloadBtn" type="button"><span class="spin">🔄</span> 새로고침</button>
         <a class="btn" id="openSheet" href="#" target="_blank" rel="noopener">📊 시트 열기</a>
+        <span class="status loading" id="pwaBadge" title="오프라인 앱 상태"><span class="dot"></span><span id="pwaText">오프라인 앱 준비 중…</span></span>
         <span class="status loading" id="statusBadge"><span class="dot"></span><span id="statusText">시트 확인 중…</span></span>
       </div>
     </div>
@@ -891,6 +898,7 @@
   <footer>
     <div id="updated">마지막 업데이트 · <b>—</b></div>
     <div>기록은 <b>‘공부 대시보드’ 구글 시트</b>와 <b>이 기기</b>에서 함께 불러와요</div>
+    <div>인터넷이 없어도 열리는 <b>오프라인 앱</b>이에요 · 홈 화면에 추가해 두면 더 편해요</div>
     <div class="foot-tools">
       <details class="news-setup" id="gasSetup">
         <summary>⚙ 구글 시트 자동 전송 설정</summary>
@@ -1032,6 +1040,28 @@
     }catch(e){}
     return d;
   }
+  /* ══ 오프라인 기록 대기열 (시트 전송 실패분) ═════════════ */
+  var PENDING_KEY = 'seohyeon.dashboard.pendingGas';
+  function pendingLoad(){
+    try{
+      var a = JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
+      return Array.isArray(a) ? a : [];
+    }catch(e){ return []; }
+  }
+  function pendingSave(list){
+    try{ localStorage.setItem(PENDING_KEY, JSON.stringify(list)); }catch(e){}
+  }
+  function pendingCount(){ return pendingLoad().length; }
+  function pendingPush(payload){
+    var list = pendingLoad();
+    list.push({ id:'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,5),
+                at:new Date().toISOString(), payload:payload });
+    pendingSave(list);
+  }
+  function pendingRemove(id){
+    pendingSave(pendingLoad().filter(function(it){ return it.id !== id; }));
+  }
+
   function saveStore(){
     try{ localStorage.setItem(LS_KEY, JSON.stringify(state.store)); }
     catch(e){ toast('저장 공간이 부족해 저장하지 못했어요'); }
@@ -1645,6 +1675,49 @@
   }
 
   /* ══ 타이머 ════════════════════════════════════════════ */
+  /* 오프라인이거나 전송이 실패하면 대기열에 넣고, 연결되면 자동으로 다시 보낸다. */
+  var flushing = false;
+  function sendStudy(payload){
+    if(!gasUrl()){ return Promise.resolve({ ok:false, skipped:true }); }
+    if(!navigator.onLine){
+      pendingPush(payload);
+      renderPwa();
+      toast('오프라인 저장됨 (인터넷 연결 시 자동 전송)');
+      return Promise.resolve({ ok:false, queued:true });
+    }
+    return gasPost(payload).then(function(r){
+      if(r.ok){
+        toast('기록을 저장하고 시트로 보냈어요');
+      } else {
+        pendingPush(payload);
+        toast('오프라인 저장됨 (인터넷 연결 시 자동 전송)');
+      }
+      renderPwa();
+      return r;
+    });
+  }
+  function flushPending(silent){
+    if(flushing) return Promise.resolve(0);
+    var list = pendingLoad();
+    if(!list.length){ renderPwa(); return Promise.resolve(0); }
+    if(!navigator.onLine){ renderPwa(); return Promise.resolve(0); }
+    flushing = true;
+    var sent = 0;
+    return list.reduce(function(chain, item){
+      return chain.then(function(){
+        return gasPost(item.payload).then(function(r){
+          if(r && r.ok){ sent++; pendingRemove(item.id); }
+        }).catch(function(){});
+      });
+    }, Promise.resolve()).then(function(){
+      flushing = false;
+      renderPwa();
+      if(sent) toast('대기 중이던 기록 ' + sent + '건을 시트로 보냈어요 📤');
+      else if(!silent) toast('아직 시트로 보내지 못했어요. 연결을 확인해 주세요');
+      return sent;
+    });
+  }
+
   var timer = {
     subject: '필수',
     running: false,
@@ -1813,10 +1886,7 @@
     showResult(log, def);
     var payload = { type:'study', date: log.date, subject: (def.sheetName || def.name), minutes: log.minutes, start: log.start, memo: '타이머 기록' };
     if(gasUrl()){
-      gasPost(payload).then(function(r){
-        if(r.ok){ toast('기록을 저장하고 시트로 보냈어요'); }
-        else { toast('기록은 저장했지만 시트 전송에 실패했어요'); }
-      });
+      sendStudy(payload);
     } else {
       toast(def.short + ' ' + minutes + '분 기록 완료! 🌟');
     }
@@ -1844,8 +1914,7 @@
     });
     var snd = $('resSend');
     if(snd) snd.addEventListener('click', function(){
-      gasPost({ type:'study', date: log.date, subject: (def.sheetName || def.name), minutes: log.minutes, start: log.start, memo:'타이머 기록' })
-        .then(function(r){ toast(r.ok ? '시트로 보냈어요!' : '전송에 실패했어요'); });
+      sendStudy({ type:'study', date: log.date, subject: (def.sheetName || def.name), minutes: log.minutes, start: log.start, memo:'타이머 기록' });
     });
     var cl = $('resClose');
     if(cl) cl.addEventListener('click', function(){ box.classList.remove('show'); });
@@ -2285,6 +2354,38 @@
     $('statusText').textContent = text;
   }
 
+  /* ══ 오프라인 앱 상태 표시 ═══════════════════════════════ */
+  var pwaState = { ready:false, reg:null, error:'' };
+  function renderPwa(){
+    var badge = $('pwaBadge'), txt = $('pwaText');
+    if(!badge || !txt) return;
+    var pend = pendingCount();
+    if(!navigator.onLine){
+      badge.className = 'status offline';
+      txt.textContent = '오프라인 모드' + (pend ? ' · 전송 대기 ' + pend + '건' : '');
+      badge.title = '인터넷 없이도 이 기기에 저장된 기록으로 열려요. 연결되면 대기 중인 기록이 시트로 자동 전송돼요.';
+    } else if(pend){
+      badge.className = 'status pending';
+      txt.textContent = '전송 대기 ' + pend + '건';
+      badge.title = '아직 시트로 보내지 못한 기록이에요. 눌러서 다시 보내 보세요.';
+    } else if(pwaState.ready){
+      badge.className = 'status ready';
+      txt.textContent = '오프라인 앱 준비됨';
+      badge.title = '인터넷이 없어도 이 앱이 열려요.';
+    } else if(!('serviceWorker' in navigator)){
+      badge.className = 'status preview';
+      txt.textContent = '오프라인 앱 미지원';
+      badge.title = '이 브라우저는 오프라인 앱을 지원하지 않아요.';
+    } else if(pwaState.error){
+      badge.className = 'status preview';
+      txt.textContent = '오프라인 앱 준비 안 됨';
+      badge.title = '오프라인 앱 등록에 실패했어요. 인터넷에 연결해 새로고침하면 다시 시도해요';
+    } else {
+      badge.className = 'status loading';
+      txt.textContent = '오프라인 앱 준비 중…';
+    }
+  }
+
   function loadSheet(showLoading){
     if(showLoading) setLoading(true);
     if(DEMO_MODE){
@@ -2304,8 +2405,13 @@
       })
       .catch(function(){
         state.sheet = { records:[], stamps:null, summary:{}, subjects:[] };
-        setStatus('preview', '이 기기 기록만');
-        $('statusBadge').title = '시트를 불러오지 못해 이 기기에 저장된 기록으로 보여주고 있어요';
+        if(navigator.onLine){
+          setStatus('preview', '이 기기 기록만');
+          $('statusBadge').title = '시트를 불러오지 못해 이 기기에 저장된 기록으로 보여주고 있어요';
+        } else {
+          setStatus('offline', '오프라인 · 이 기기 기록');
+          $('statusBadge').title = '인터넷이 없어 이 기기에 저장된 기록으로 보여주고 있어요. 연결되면 자동으로 시트를 다시 불러와요';
+        }
       })
       .then(function(){
         setLoading(false);
@@ -2396,6 +2502,22 @@
       : '주소를 넣어 두면 타이머를 끝낼 때 시트로 자동 전송을 시도해요. 비워 두면 이 기기에만 저장돼요.';
   });
 
+  /* ══ 인터넷 연결 변화 · 대기열 자동 전송 ═══════════════ */
+  window.addEventListener('online', function(){
+    renderPwa();
+    flushPending(true);
+    loadSheet(false);
+  });
+  window.addEventListener('offline', function(){
+    renderPwa();
+    toast('오프라인 모드예요. 기록은 이 기기에 저장돼요');
+  });
+  $('pwaBadge').addEventListener('click', function(){
+    if(!pendingCount()) return;
+    if(!navigator.onLine){ toast('연결되면 자동으로 보내요 (' + pendingCount() + '건 대기 중)'); return; }
+    flushPending(false);
+  });
+
   var resizeT = null;
   window.addEventListener('resize', function(){
     clearTimeout(resizeT);
@@ -2413,7 +2535,35 @@
   $('cardTodo').addEventListener('change', onTodoChange);
   $('cardMoney').addEventListener('click', onMoneyClick);
 
+  /* ══ 오프라인 앱(Service Worker) 등록 ═══════════════════ */
+  function registerPWA(){
+    if(!('serviceWorker' in navigator)){ renderPwa(); return; }
+    try{
+      navigator.serviceWorker.register('./sw.js').then(function(reg){
+        pwaState.reg = reg;
+        if(navigator.serviceWorker.controller) pwaState.ready = true;
+        renderPwa();
+        navigator.serviceWorker.ready.then(function(){ pwaState.ready = true; renderPwa(); });
+        reg.addEventListener('updatefound', function(){
+          var w = reg.installing;
+          if(!w) return;
+          w.addEventListener('statechange', function(){
+            if(w.state === 'installed' && navigator.serviceWorker.controller){
+              toast('새 버전이 준비됐어요. 새로고침하면 적용돼요 ✨');
+            }
+          });
+        });
+      }).catch(function(e){ pwaState.error = String(e); renderPwa(); });
+      navigator.serviceWorker.addEventListener('controllerchange', function(){
+        pwaState.ready = true; renderPwa();
+      });
+    }catch(e){ pwaState.error = String(e); renderPwa(); }
+  }
+
   /* ══ 시작 ══════════════════════════════════════════════ */
+  registerPWA();
+  renderPwa();
+  restoreTimer();  /* ══ 시작 ══════════════════════════════════════════════ */
   restoreTimer();
   syncTimerOpt();
   seedDemoTodo();
@@ -2431,6 +2581,7 @@
     showResumePrompt(timer.pausedBy === 'reload' ? 'reload' : 'hidden');
   }
   loadSheet(false);
+  if(navigator.onLine && pendingCount()) flushPending(true);
 })();
 </script>
 </body>
